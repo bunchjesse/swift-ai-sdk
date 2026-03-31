@@ -585,40 +585,17 @@ public enum UserContent: Sendable, Equatable, Codable {
     /// Array of content parts (text, images, files)
     case parts([UserContentPart])
 
-    private enum LegacyCodingKeys: String, CodingKey {
-        case type, value, parts
-    }
-
     public init(from decoder: Decoder) throws {
-        let singleValue = try decoder.singleValueContainer()
+        let container = try decoder.singleValueContainer()
 
-        // Upstream shape: bare string for text content
-        if let string = try? singleValue.decode(String.self) {
+        if let string = try? container.decode(String.self) {
             self = .text(string)
             return
         }
 
-        // Upstream shape: bare array for parts
-        if let parts = try? singleValue.decode([UserContentPart].self) {
+        if let parts = try? container.decode([UserContentPart].self) {
             self = .parts(parts)
             return
-        }
-
-        // Backward compat with the wrapper format we previously emitted
-        if let keyed = try? decoder.container(keyedBy: LegacyCodingKeys.self),
-           let type = try? keyed.decode(String.self, forKey: .type) {
-            switch type {
-            case "text":
-                let value = try keyed.decode(String.self, forKey: .value)
-                self = .text(value)
-                return
-            case "parts":
-                let parts = try keyed.decode([UserContentPart].self, forKey: .parts)
-                self = .parts(parts)
-                return
-            default:
-                break
-            }
         }
 
         throw DecodingError.dataCorrupted(
@@ -653,40 +630,17 @@ public enum AssistantContent: Sendable, Equatable, Codable {
     /// Array of content parts
     case parts([AssistantContentPart])
 
-    private enum LegacyCodingKeys: String, CodingKey {
-        case type, value, parts
-    }
-
     public init(from decoder: Decoder) throws {
-        let singleValue = try decoder.singleValueContainer()
+        let container = try decoder.singleValueContainer()
 
-        // Upstream shape: bare string for text content
-        if let string = try? singleValue.decode(String.self) {
+        if let string = try? container.decode(String.self) {
             self = .text(string)
             return
         }
 
-        // Upstream shape: bare array for parts
-        if let parts = try? singleValue.decode([AssistantContentPart].self) {
+        if let parts = try? container.decode([AssistantContentPart].self) {
             self = .parts(parts)
             return
-        }
-
-        // Backward compat with the wrapper format we previously emitted
-        if let keyed = try? decoder.container(keyedBy: LegacyCodingKeys.self),
-           let type = try? keyed.decode(String.self, forKey: .type) {
-            switch type {
-            case "text":
-                let value = try keyed.decode(String.self, forKey: .value)
-                self = .text(value)
-                return
-            case "parts":
-                let parts = try keyed.decode([AssistantContentPart].self, forKey: .parts)
-                self = .parts(parts)
-                return
-            default:
-                break
-            }
         }
 
         throw DecodingError.dataCorrupted(

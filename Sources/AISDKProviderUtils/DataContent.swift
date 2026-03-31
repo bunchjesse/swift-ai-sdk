@@ -16,18 +16,10 @@ public enum DataContentOrURL: Sendable, Equatable, Codable {
     case string(String)
     case url(URL)
 
-    private enum LegacyCodingKeys: String, CodingKey {
-        case type
-        case data
-        case value
-        case url
-    }
-
     public init(from decoder: Decoder) throws {
-        let singleValue = try decoder.singleValueContainer()
+        let container = try decoder.singleValueContainer()
 
-        // Upstream shape is a bare string (base64 or URL)
-        if let string = try? singleValue.decode(String.self) {
+        if let string = try? container.decode(String.self) {
             if let url = URL(string: string), url.scheme != nil {
                 self = .url(url)
             } else {
@@ -36,38 +28,9 @@ public enum DataContentOrURL: Sendable, Equatable, Codable {
             return
         }
 
-        // Raw binary data
-        if let data = try? singleValue.decode(Data.self) {
+        if let data = try? container.decode(Data.self) {
             self = .data(data)
             return
-        }
-
-        // Backward compat with the wrapper format we previously emitted
-        if let keyed = try? decoder.container(keyedBy: LegacyCodingKeys.self),
-           let type = try? keyed.decode(String.self, forKey: .type) {
-            switch type {
-            case "data":
-                let base64 = try keyed.decode(String.self, forKey: .data)
-                guard let decoded = Data(base64Encoded: base64) else {
-                    throw DecodingError.dataCorruptedError(
-                        forKey: .data,
-                        in: keyed,
-                        debugDescription: "Invalid base64 string"
-                    )
-                }
-                self = .data(decoded)
-                return
-            case "string":
-                let value = try keyed.decode(String.self, forKey: .value)
-                self = .string(value)
-                return
-            case "url":
-                let url = try keyed.decode(URL.self, forKey: .url)
-                self = .url(url)
-                return
-            default:
-                break
-            }
         }
 
         throw DecodingError.dataCorrupted(
