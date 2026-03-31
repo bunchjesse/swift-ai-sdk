@@ -194,4 +194,98 @@ struct ModelMessageCodableTests {
         let decoded = try JSONDecoder().decode([ModelMessage].self, from: data)
         #expect(decoded == conversation)
     }
+
+    // MARK: - Upstream JSON shape decoding
+
+    @Test func decodesUserMessageWithStringContent() throws {
+        let json = """
+        {"role":"user","content":"Hello"}
+        """
+        let msg = try JSONDecoder().decode(ModelMessage.self, from: Data(json.utf8))
+        guard case .user(let user) = msg,
+              case .text(let text) = user.content else {
+            Issue.record("Expected user message with text content")
+            return
+        }
+        #expect(text == "Hello")
+    }
+
+    @Test func decodesUserMessageWithPartsArray() throws {
+        let json = """
+        {"role":"user","content":[{"type":"text","text":"Look"},{"type":"image","image":"iVBOR","mediaType":"image/png"}]}
+        """
+        let msg = try JSONDecoder().decode(ModelMessage.self, from: Data(json.utf8))
+        guard case .user(let user) = msg,
+              case .parts(let parts) = user.content else {
+            Issue.record("Expected user message with parts content")
+            return
+        }
+        #expect(parts.count == 2)
+    }
+
+    @Test func decodesAssistantMessageWithStringContent() throws {
+        let json = """
+        {"role":"assistant","content":"Hi there"}
+        """
+        let msg = try JSONDecoder().decode(ModelMessage.self, from: Data(json.utf8))
+        guard case .assistant(let asst) = msg,
+              case .text(let text) = asst.content else {
+            Issue.record("Expected assistant message with text content")
+            return
+        }
+        #expect(text == "Hi there")
+    }
+
+    @Test func decodesImagePartWithDirectStringData() throws {
+        let json = """
+        {"role":"user","content":[{"type":"image","image":"iVBORbase64data","mediaType":"image/png"}]}
+        """
+        let msg = try JSONDecoder().decode(ModelMessage.self, from: Data(json.utf8))
+        guard case .user(let user) = msg,
+              case .parts(let parts) = user.content,
+              case .image(let imagePart) = parts.first,
+              case .string(let data) = imagePart.image else {
+            Issue.record("Expected image part with string data")
+            return
+        }
+        #expect(data == "iVBORbase64data")
+    }
+
+    @Test func encodesUserTextContentAsBareString() throws {
+        let msg = ModelMessage.user(UserModelMessage(content: .text("Hello")))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(msg)
+        let json = try JSONDecoder().decode([String: JSONValue].self, from: data)
+        guard case .string(let content) = json["content"] else {
+            Issue.record("Expected content to be a bare string, got \(String(describing: json["content"]))")
+            return
+        }
+        #expect(content == "Hello")
+    }
+
+    @Test func encodesUserPartsContentAsBareArray() throws {
+        let msg = ModelMessage.user(UserModelMessage(content: .parts([
+            .text(TextPart(text: "Look")),
+        ])))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(msg)
+        let json = try JSONDecoder().decode([String: JSONValue].self, from: data)
+        guard case .array = json["content"] else {
+            Issue.record("Expected content to be a bare array, got \(String(describing: json["content"]))")
+            return
+        }
+    }
+
+    @Test func encodesImageDataAsBareString() throws {
+        let msg = ModelMessage.user(UserModelMessage(content: .parts([
+            .image(ImagePart(image: .string("iVBOR"), mediaType: "image/png")),
+        ])))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(msg)
+        let str = String(data: data, encoding: .utf8)!
+        #expect(str.contains("\"image\":\"iVBOR\""))
+    }
 }
