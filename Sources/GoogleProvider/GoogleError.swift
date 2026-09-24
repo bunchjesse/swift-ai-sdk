@@ -22,7 +22,7 @@ public struct GoogleErrorData: Sendable, Equatable {
     }
 }
 
-private let googleErrorSchema = FlexibleSchema(
+let googleErrorSchema = FlexibleSchema(
     Schema<GoogleErrorData>(
         jsonSchemaResolver: {
             .object([

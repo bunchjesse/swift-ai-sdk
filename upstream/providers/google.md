@@ -32,6 +32,10 @@
 - [x] File content metadata parity: `inlineData` parts in generate responses carry `providerMetadata` (thought signature), while streamed `file` chunks intentionally omit it, matching upstream behavior.
 - [x] Stream parse-error payload parity: invalid SSE chunk schema now emits serialized parse/type-validation error payload (`name`/`message`/`value`) instead of raw chunk JSON.
 
+## Intentional Swift deviations
+
+- Trailing stream error bodies: Google can return HTTP 200 for `streamGenerateContent` and then end the SSE body with a bare JSON error object that has no `data:` prefix (observed: `{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}` after a thought chunk). Upstream `parseJsonEventStream` ignores those unknown-field lines, so the stream finishes as `other` with no raw reason. `createGoogleEventSourceResponseHandler` (`Sources/GoogleProvider/GoogleEventSourceResponseHandler.swift`) keeps the unknown-field lines after the last event. When they decode as a Google error body, the stream throws an `APICallError` whose `statusCode` is the body's `error.code`, so callers can retry a 429 the same way as a pre-stream 429. Upstream main at `3f3a717e2237c56aed9fab22269f07ccfeb0a142` has the same gap; the closest upstream fix is openai-compatible #19169, which reports a missing finish reason as an error. Tests: `Tests/GoogleProviderTests/GoogleErrorHandlingTests.swift`.
+
 ## Known gaps / TODO
 
 - None known.

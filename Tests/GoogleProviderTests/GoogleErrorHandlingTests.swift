@@ -91,4 +91,129 @@ struct GoogleErrorHandlingTests {
             Issue.record("Expected APICallError, got: \(error)")
         }
     }
+
+    // MARK: - Trailing stream errors
+
+    /// Body captured from a real `streamGenerateContent` response: HTTP 200, one
+    /// thought chunk, then a bare JSON error object without a `data:` prefix.
+    private static let resourceExhaustedStreamBody = """
+    data: {"candidates": [{"content": {"role": "model","parts": [{"text": "**Analyzing**\\n\\n","thought": true}]}}],"usageMetadata": {"trafficType": "ON_DEMAND"},"modelVersion": "gemini-3.8-flash","responseId": "resp-1"}
+
+    {
+
+      "error": {
+
+        "code": 429,
+
+        "message": "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+
+        "status": "RESOURCE_EXHAUSTED"
+
+      }
+
+    }
+
+
+    """
+
+    private static func streamingModel(body: String) -> GoogleGenerativeAILanguageModel {
+        let fetch: FetchFunction = { request in
+            let url = try #require(request.url)
+            let response = try #require(HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            ))
+            let stream = AsyncThrowingStream<Data, Error> { continuation in
+                continuation.yield(Data(body.utf8))
+                continuation.finish()
+            }
+            return FetchResponse(body: .stream(stream), urlResponse: response)
+        }
+
+        return GoogleGenerativeAILanguageModel(
+            modelId: GoogleGenerativeAIModelId(rawValue: "gemini-3.8-flash"),
+            config: GoogleGenerativeAILanguageModel.Config(
+                provider: "google.generative-ai",
+                baseURL: "https://generativelanguage.googleapis.com/v1beta",
+                headers: { ["x-goog-api-key": "test"] },
+                fetch: fetch,
+                generateId: { "id" },
+                supportedUrls: { [:] }
+            )
+        )
+    }
+
+    private static let prompt: LanguageModelV3Prompt = [
+        .user(content: [.text(.init(text: "Hello"))], providerOptions: nil)
+    ]
+
+    @Test("doStream fails with APICallError when a 200 stream ends with a Google error body")
+    func doStream_trailingErrorBodyThrowsAPICallError() async throws {
+        let model = Self.streamingModel(body: Self.resourceExhaustedStreamBody)
+        let result = try await model.doStream(options: .init(prompt: Self.prompt))
+
+        var parts: [LanguageModelV3StreamPart] = []
+        do {
+            for try await part in result.stream {
+                parts.append(part)
+            }
+            Issue.record("Expected the stream to throw APICallError")
+        } catch let error as APICallError {
+            #expect(error.statusCode == 429)
+            #expect(error.isRetryable)
+            #expect(error.message.hasPrefix("Resource exhausted."))
+            #expect((error.data as? GoogleErrorData)?.error.status == "RESOURCE_EXHAUSTED")
+        } catch {
+            Issue.record("Expected APICallError, got: \(error)")
+        }
+
+        #expect(parts.contains { if case .reasoningDelta = $0 { true } else { false } })
+        #expect(!parts.contains { if case .finish = $0 { true } else { false } })
+    }
+
+    @Test("doStream ignores trailing unknown-field lines that are not a Google error body")
+    func doStream_ignoresNonErrorTrailingLines() async throws {
+        let body = """
+        data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}
+
+        not-an-sse-field
+        {"unrelated": true}
+
+        """
+        let model = Self.streamingModel(body: body)
+        let result = try await model.doStream(options: .init(prompt: Self.prompt))
+
+        var finishReason: LanguageModelV3FinishReason?
+        for try await part in result.stream {
+            if case .finish(let reason, _, _) = part {
+                finishReason = reason
+            }
+        }
+
+        #expect(finishReason?.unified == .stop)
+    }
+
+    @Test("doStream only treats lines after the last event as a trailing error body")
+    func doStream_unknownLinesBeforeLaterEventsAreDiscarded() async throws {
+        let body = """
+        {"error": {"code": 429, "message": "stale", "status": "RESOURCE_EXHAUSTED"}}
+
+        data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}
+
+
+        """
+        let model = Self.streamingModel(body: body)
+        let result = try await model.doStream(options: .init(prompt: Self.prompt))
+
+        var finishReason: LanguageModelV3FinishReason?
+        for try await part in result.stream {
+            if case .finish(let reason, _, _) = part {
+                finishReason = reason
+            }
+        }
+
+        #expect(finishReason?.unified == .stop)
+    }
 }

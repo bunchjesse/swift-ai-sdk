@@ -125,7 +125,7 @@ public final class GoogleGenerativeAILanguageModel: LanguageModelV3 {
             headers: headers,
             body: JSONValue.object(prepared.body),
             failedResponseHandler: googleFailedResponseHandler,
-            successfulResponseHandler: createEventSourceResponseHandler(chunkSchema: googleGenerativeAIChunkSchema),
+            successfulResponseHandler: createGoogleEventSourceResponseHandler(chunkSchema: googleGenerativeAIChunkSchema),
             isAborted: options.abortSignal,
             fetch: config.fetch
         )
