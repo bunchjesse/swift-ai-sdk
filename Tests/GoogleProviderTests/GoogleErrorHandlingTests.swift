@@ -116,7 +116,14 @@ struct GoogleErrorHandlingTests {
 
     """
 
-    private static func streamingModel(body: String) -> GoogleGenerativeAILanguageModel {
+    /// Serves `body` as an SSE response, split into `chunkSize`-byte chunks
+    /// (the whole body in one chunk when `chunkSize` is nil).
+    private static func streamingModel(body: String, chunkSize: Int? = nil) -> GoogleGenerativeAILanguageModel {
+        let bytes = Data(body.utf8)
+        let chunks: [Data] = chunkSize.map { size in
+            stride(from: 0, to: bytes.count, by: size).map { bytes.subdata(in: $0..<min($0 + size, bytes.count)) }
+        } ?? [bytes]
+
         let fetch: FetchFunction = { request in
             let url = try #require(request.url)
             let response = try #require(HTTPURLResponse(
@@ -126,7 +133,9 @@ struct GoogleErrorHandlingTests {
                 headerFields: ["Content-Type": "text/event-stream"]
             ))
             let stream = AsyncThrowingStream<Data, Error> { continuation in
-                continuation.yield(Data(body.utf8))
+                for chunk in chunks {
+                    continuation.yield(chunk)
+                }
                 continuation.finish()
             }
             return FetchResponse(body: .stream(stream), urlResponse: response)
@@ -149,9 +158,12 @@ struct GoogleErrorHandlingTests {
         .user(content: [.text(.init(text: "Hello"))], providerOptions: nil)
     ]
 
-    @Test("doStream fails with APICallError when a 200 stream ends with a Google error body")
-    func doStream_trailingErrorBodyThrowsAPICallError() async throws {
-        let model = Self.streamingModel(body: Self.resourceExhaustedStreamBody)
+    @Test(
+        "doStream fails with APICallError when a 200 stream ends with a Google error body",
+        arguments: [nil, 1, 7] as [Int?]
+    )
+    func doStream_trailingErrorBodyThrowsAPICallError(chunkSize: Int?) async throws {
+        let model = Self.streamingModel(body: Self.resourceExhaustedStreamBody, chunkSize: chunkSize)
         let result = try await model.doStream(options: .init(prompt: Self.prompt))
 
         var parts: [LanguageModelV3StreamPart] = []
@@ -171,6 +183,28 @@ struct GoogleErrorHandlingTests {
 
         #expect(parts.contains { if case .reasoningDelta = $0 { true } else { false } })
         #expect(!parts.contains { if case .finish = $0 { true } else { false } })
+    }
+
+    @Test("doStream leaves statusCode nil when the trailing error code is not an integer")
+    func doStream_trailingErrorBodyWithNonIntegralCode() async throws {
+        let body = """
+        data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}
+
+        {"error": {"code": 1e300, "message": "odd", "status": "UNKNOWN"}}
+
+        """
+        let model = Self.streamingModel(body: body)
+        let result = try await model.doStream(options: .init(prompt: Self.prompt))
+
+        do {
+            for try await _ in result.stream {}
+            Issue.record("Expected the stream to throw APICallError")
+        } catch let error as APICallError {
+            #expect(error.statusCode == nil)
+            #expect(error.message == "odd")
+        } catch {
+            Issue.record("Expected APICallError, got: \(error)")
+        }
     }
 
     @Test("doStream ignores trailing unknown-field lines that are not a Google error body")

@@ -103,7 +103,7 @@ private func googleTrailingStreamError(
         message: data.error.message,
         url: input.url,
         requestBodyValues: input.requestBodyValues,
-        statusCode: data.error.code.map { Int($0) },
+        statusCode: data.error.code.flatMap { Int(exactly: $0) },
         responseHeaders: responseHeaders,
         responseBody: body,
         data: data
