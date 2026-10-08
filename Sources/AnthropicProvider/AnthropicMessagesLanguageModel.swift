@@ -1224,6 +1224,7 @@ public final class AnthropicMessagesLanguageModel: LanguageModelV3 {
             || modelId.contains("claude-opus-4-7")
             || modelId.contains("claude-fable-5")
             || modelId.contains("claude-sonnet-5")
+            || modelId.contains("claude-haiku-5-5")
         {
             return AnthropicModelCapabilities(
                 maxOutputTokens: 128000,

@@ -30,7 +30,8 @@ public let anthropicMessagesModelIds: [AnthropicMessagesModelId] = [
     "claude-opus-4-8",
     "claude-fable-5",
     "claude-sonnet-5",
-    "claude-opus-5-5"
+    "claude-opus-5-5",
+    "claude-haiku-5-5"
 ].map(AnthropicMessagesModelId.init(rawValue:))
 
 public struct AnthropicThinkingOptions: Sendable, Equatable {

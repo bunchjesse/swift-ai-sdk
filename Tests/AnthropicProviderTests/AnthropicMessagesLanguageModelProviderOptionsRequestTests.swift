@@ -1546,10 +1546,13 @@ struct AnthropicMessagesLanguageModelProviderOptionsRequestTests {
         ]))
     }
 
-    @Test("new Anthropic models reject sampling parameters")
-    func newModelsRejectSamplingParameters() async throws {
+    @Test(
+        "new Anthropic models reject sampling parameters",
+        arguments: ["claude-opus-4-8", "claude-haiku-5-5", "anthropic.claude-haiku-5-5"]
+    )
+    func newModelsRejectSamplingParameters(modelId: String) async throws {
         let capture = RequestCapture()
-        let responseData = try makeProviderOptionsTestResponseData(model: "claude-opus-4-8")
+        let responseData = try makeProviderOptionsTestResponseData(model: modelId)
 
         let fetch: FetchFunction = { request in
             await capture.store(request)
@@ -1557,7 +1560,7 @@ struct AnthropicMessagesLanguageModelProviderOptionsRequestTests {
         }
 
         let model = AnthropicMessagesLanguageModel(
-            modelId: .init(rawValue: "claude-opus-4-8"),
+            modelId: .init(rawValue: modelId),
             config: makeProviderOptionsTestConfig(fetch: fetch)
         )
 
@@ -1615,6 +1618,8 @@ struct AnthropicMessagesLanguageModelProviderOptionsRequestTests {
             "claude-opus-4-8",
             "claude-fable-5",
             "claude-sonnet-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
         ]))
     }
 }
