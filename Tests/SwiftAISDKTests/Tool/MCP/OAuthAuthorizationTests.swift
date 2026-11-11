@@ -253,7 +253,8 @@ struct OAuthAuthorizationTests {
     }
 }
 
-private actor OAuthStore {
+/// Records the credentials and redirects a fake OAuth provider reads and writes.
+actor OAuthStore {
     var client: OAuthClientInformation?
     var savedTokens: OAuthTokens?
     var pin: OAuthAuthorizationServerInformation?
@@ -285,7 +286,8 @@ private actor OAuthStore {
     }
 }
 
-private struct FlowProvider: OAuthClientProvider {
+/// A fake `OAuthClientProvider` backed by an `OAuthStore`, with `client.scope` as its client scope.
+struct FlowProvider: OAuthClientProvider {
     let store: OAuthStore
     let clientMetadata: OAuthClientMetadata
     var separatePin = true
@@ -293,12 +295,13 @@ private struct FlowProvider: OAuthClientProvider {
     var state: OAuthStateProvider? = { "flow-state" }
     let redirectUrl = URL(string: "http://localhost:3000/callback")!
 
-    init(store: OAuthStore, separatePin: Bool = true, dynamic: Bool = false) throws {
+    init(store: OAuthStore, separatePin: Bool = true, dynamic: Bool = false, grantTypes: [String]? = nil) throws {
         self.store = store
         self.separatePin = separatePin
         self.dynamic = dynamic
         self.clientMetadata = OAuthClientMetadata(
-            redirectUris: [try SafeURL(URL(string: "http://localhost:3000/callback")!)], scope: "client.scope"
+            redirectUris: [try SafeURL(URL(string: "http://localhost:3000/callback")!)],
+            grantTypes: grantTypes, scope: "client.scope"
         )
     }
 
@@ -320,18 +323,24 @@ private struct FlowProvider: OAuthClientProvider {
     var invalidateCredentials: OAuthInvalidateCredentials? { { await store.invalidate($0, $1) } }
 }
 
-private func oauthResponse(_ request: URLRequest, status: Int = 200, json: [String: Any]) throws -> (Data, HTTPURLResponse) {
+/// Builds a JSON response for a fake OAuth endpoint.
+func oauthResponse(_ request: URLRequest, status: Int = 200, json: [String: Any]) throws -> (Data, HTTPURLResponse) {
     (try JSONSerialization.data(withJSONObject: json), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
 }
 
-private actor OAuthServer {
+/// A fake protected resource plus authorization server that records every request it serves.
+actor OAuthServer {
     var requests: [URLRequest] = []
     var scopes: [String]?
+    var authorizationServerScopes: [String]?
     var protectedMetadataAvailable = true
     var tokenEndpoint = "https://auth.example.com/token"
     let serverUrl = URL(string: "https://resource.example.com/mcp")!
 
-    init(scopes: [String]? = nil) { self.scopes = scopes }
+    init(scopes: [String]? = nil, authorizationServerScopes: [String]? = nil) {
+        self.scopes = scopes
+        self.authorizationServerScopes = authorizationServerScopes
+    }
     func hideProtectedMetadata() { protectedMetadataAvailable = false }
     func changeTokenEndpoint() { tokenEndpoint = "https://auth.example.com/changed-token" }
     func fetch(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
@@ -343,11 +352,13 @@ private actor OAuthServer {
             return try oauthResponse(request, json: metadata)
         }
         if url.host == "auth.example.com", url.path.contains("oauth-authorization-server") {
-            return try oauthResponse(request, json: [
+            var metadata: [String: Any] = [
                 "issuer": "https://auth.example.com", "authorization_endpoint": "https://auth.example.com/authorize",
                 "token_endpoint": tokenEndpoint, "registration_endpoint": "https://auth.example.com/register",
                 "response_types_supported": ["code"], "code_challenge_methods_supported": ["S256"],
-            ])
+            ]
+            if let authorizationServerScopes { metadata["scopes_supported"] = authorizationServerScopes }
+            return try oauthResponse(request, json: metadata)
         }
         if url.path == "/register" {
             var body = try #require(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
@@ -361,7 +372,8 @@ private actor OAuthServer {
     }
 }
 
-private func flowPin() -> OAuthAuthorizationServerInformation {
+/// The authorization-server pin that matches what `OAuthServer` advertises.
+func flowPin() -> OAuthAuthorizationServerInformation {
     OAuthAuthorizationServerInformation(
         issuer: "https://auth.example.com", authorizationServerUrl: URL(string: "https://auth.example.com")!,
         tokenEndpoint: URL(string: "https://auth.example.com/token")!

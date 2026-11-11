@@ -117,6 +117,10 @@ public struct MCPTransportConfig: Sendable {
     public let onSessionExpired: (@Sendable (String) -> Void)?
     public let terminateSessionOnClose: Bool
 
+    /// Maximum number of re-authorization attempts per request after a 403 `insufficient_scope`
+    /// challenge (SEP-2350). Negative values are treated as 0.
+    public let maxStepUpRetries: Int
+
     public init(
         type: String = "sse",
         url: String,
@@ -128,6 +132,7 @@ public struct MCPTransportConfig: Sendable {
         onSessionIdChange: (@Sendable (String?) -> Void)? = nil,
         onSessionExpired: (@Sendable (String) -> Void)? = nil,
         terminateSessionOnClose: Bool = true,
+        maxStepUpRetries: Int = 1,
         fetch: FetchFunction? = nil
     ) {
         self.type = type
@@ -141,6 +146,7 @@ public struct MCPTransportConfig: Sendable {
         self.onSessionIdChange = onSessionIdChange
         self.onSessionExpired = onSessionExpired
         self.terminateSessionOnClose = terminateSessionOnClose
+        self.maxStepUpRetries = maxStepUpRetries
     }
 }
 

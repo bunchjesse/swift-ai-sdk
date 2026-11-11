@@ -24,7 +24,7 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
     private let fetchFn: FetchFunction
     private let headers: [String: String]?
     private let authProvider: OAuthClientProvider?
-    private var resourceMetadataUrl: URL?
+    private let maxStepUpRetries: Int
     private var sessionId: String?
     private var protocolVersion = LATEST_PROTOCOL_VERSION
     private let redirect: MCPRedirectMode
@@ -70,6 +70,7 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
         fetchFn = fetch
         headers = config.headers
         authProvider = config.authProvider
+        maxStepUpRetries = max(0, config.maxStepUpRetries)
         redirect = config.redirect
         sessionId = config.initialSessionId
         protocolVersion = config.initialProtocolVersion ?? LATEST_PROTOCOL_VERSION
@@ -246,7 +247,12 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
         )
     }
 
-    private func attemptSend(message: JSONRPCMessage, triedAuth: Bool, options: MCPTransportSendOptions?) async throws {
+    private func attemptSend(
+        message: JSONRPCMessage,
+        triedAuth: Bool,
+        options: MCPTransportSendOptions?,
+        stepUpRetries: Int = 0
+    ) async throws {
         do {
             try Task.checkCancellation()
             let sessionIdForRequest = isInitialize(message) ? nil : stateLock.withLock { sessionId }
@@ -279,16 +285,13 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
             if httpResponse.statusCode == 401, let authProvider, !triedAuth {
                 await cancelResponseBody(.init(url: url, httpResponse: httpResponse, body: bytes))
                 let challenge = extractWWWAuthenticateParams(httpResponse)
-                resourceMetadataUrl = challenge.resourceMetadataUrl
                 do {
-                    let result = try await authorization.authorize { [self] in try await auth(
-                        authProvider,
+                    let result = try await authorization.authorizeAfterUnauthorized(
+                        provider: authProvider,
                         serverUrl: url,
-                        authorizationCode: nil,
-                        scope: challenge.scope,
-                        resourceMetadataUrl: challenge.resourceMetadataUrl,
-                        fetchFn: mcpOAuthFetch(fetchFn)
-                    ) }
+                        challenge: (challenge.resourceMetadataUrl, challenge.scope),
+                        fetch: mcpOAuthFetch(fetchFn)
+                    )
                     guard result == .authorized else {
                         let error = UnauthorizedError()
                         onerror?(error)
@@ -299,7 +302,17 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
                     throw error
                 }
 
-                try await attemptSend(message: message, triedAuth: true, options: options)
+                try await attemptSend(message: message, triedAuth: true, options: options, stepUpRetries: stepUpRetries)
+                return
+            }
+
+            if let challenge = await mcpInsufficientScopeChallenge(httpResponse, body: bytes) {
+                let result = try await authorization.stepUp(
+                    challenge: challenge, retries: stepUpRetries, maxRetries: maxStepUpRetries,
+                    provider: authProvider, serverUrl: url, fetch: mcpOAuthFetch(fetchFn)
+                )
+                guard result == .authorized else { throw UnauthorizedError() }
+                try await attemptSend(message: message, triedAuth: triedAuth, options: options, stepUpRetries: stepUpRetries + 1)
                 return
             }
 
@@ -501,7 +514,7 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
         }
     }
 
-    private func openInboundSse(triedAuth: Bool, resumeToken: String?, generation: UUID) async {
+    private func openInboundSse(triedAuth: Bool, resumeToken: String?, generation: UUID, stepUpRetries: Int = 0) async {
         defer {
             stateLock.withLock {
                 guard _inboundGeneration == generation else { return }
@@ -539,16 +552,13 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
             if httpResponse.statusCode == 401, let authProvider, !triedAuth {
                 await cancelResponseBody(.init(url: url, httpResponse: httpResponse, body: bytes))
                 let challenge = extractWWWAuthenticateParams(httpResponse)
-                resourceMetadataUrl = challenge.resourceMetadataUrl
                 do {
-                    let result = try await authorization.authorize { [self] in try await auth(
-                        authProvider,
+                    let result = try await authorization.authorizeAfterUnauthorized(
+                        provider: authProvider,
                         serverUrl: url,
-                        authorizationCode: nil,
-                        scope: challenge.scope,
-                        resourceMetadataUrl: challenge.resourceMetadataUrl,
-                        fetchFn: mcpOAuthFetch(fetchFn)
-                    ) }
+                        challenge: (challenge.resourceMetadataUrl, challenge.scope),
+                        fetch: mcpOAuthFetch(fetchFn)
+                    )
                     guard result == .authorized else {
                         onerror?(UnauthorizedError())
                         return
@@ -558,7 +568,28 @@ public final class HttpMCPTransport: MCPTransport, @unchecked Sendable {
                     return
                 }
 
-                await openInboundSse(triedAuth: true, resumeToken: resumeToken, generation: generation)
+                await openInboundSse(triedAuth: true, resumeToken: resumeToken, generation: generation, stepUpRetries: stepUpRetries)
+                return
+            }
+
+            if let challenge = await mcpInsufficientScopeChallenge(httpResponse, body: bytes) {
+                do {
+                    let result = try await authorization.stepUp(
+                        challenge: challenge, retries: stepUpRetries, maxRetries: maxStepUpRetries,
+                        provider: authProvider, serverUrl: url, fetch: mcpOAuthFetch(fetchFn)
+                    )
+                    guard result == .authorized else {
+                        onerror?(UnauthorizedError())
+                        return
+                    }
+                } catch {
+                    onerror?(error)
+                    return
+                }
+
+                await openInboundSse(
+                    triedAuth: triedAuth, resumeToken: resumeToken, generation: generation, stepUpRetries: stepUpRetries + 1
+                )
                 return
             }
 

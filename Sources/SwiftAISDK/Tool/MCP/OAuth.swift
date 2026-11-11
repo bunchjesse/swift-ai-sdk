@@ -139,23 +139,45 @@ public struct UnauthorizedError: Error, LocalizedError, Sendable {
     public var errorDescription: String? { message }
 }
 
+/// Thrown when a server answers 403 `insufficient_scope` (SEP-2350) and the transport has no
+/// `authProvider` to re-authorize with, so the host can act on the challenge.
+public struct InsufficientScopeError: Error, LocalizedError, Sendable {
+    /// The `scope` the server's `WWW-Authenticate` challenge asked for, if any.
+    public let requiredScope: String?
+    /// The challenge's `resource_metadata` URL, if any.
+    public let resourceMetadataUrl: URL?
+    /// The challenge's `error_description`, if any.
+    public let errorDescription: String?
+
+    /// Creates an error carrying the parameters of a 403 `insufficient_scope` challenge.
+    public init(requiredScope: String? = nil, resourceMetadataUrl: URL? = nil, errorDescription: String? = nil) {
+        self.requiredScope = requiredScope
+        self.resourceMetadataUrl = resourceMetadataUrl
+        self.errorDescription = errorDescription
+    }
+}
+
+/// Extracts `resource_metadata`, `scope`, `error`, and `error_description` from a `Bearer`
+/// `WWW-Authenticate` challenge. Parameter values may be quoted or bare tokens.
 public func extractWWWAuthenticateParams(
     _ response: HTTPURLResponse
-) -> (resourceMetadataUrl: URL?, scope: String?) {
-    guard let header = response.value(forHTTPHeaderField: "WWW-Authenticate") else { return (nil, nil) }
+) -> (resourceMetadataUrl: URL?, scope: String?, error: String?, errorDescription: String?) {
+    guard let header = response.value(forHTTPHeaderField: "WWW-Authenticate") else { return (nil, nil, nil, nil) }
     let parts = header.split(separator: " ", maxSplits: 1)
-    guard parts.count == 2, parts[0].lowercased() == "bearer" else { return (nil, nil) }
+    guard parts.count == 2, parts[0].lowercased() == "bearer" else { return (nil, nil, nil, nil) }
 
     func parameter(_ name: String) -> String? {
-        let pattern = "(?:^|[,\\s])\(name)=\"([^\"]*)\""
+        let pattern = "(?:^|[,\\s])\(name)=(?:\"([^\"]*)\"|([^\\s,\"]+))"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: header, range: NSRange(header.startIndex..., in: header)),
-              let range = Range(match.range(at: 1), in: header) else { return nil }
-        return String(header[range])
+              let match = regex.firstMatch(in: header, range: NSRange(header.startIndex..., in: header)) else { return nil }
+        for group in 1...2 {
+            if let range = Range(match.range(at: group), in: header) { return String(header[range]) }
+        }
+        return nil
     }
 
     let url = parameter("resource_metadata").flatMap(URL.init(string:))
-    return (url?.scheme == nil ? nil : url, parameter("scope"))
+    return (url?.scheme == nil ? nil : url, parameter("scope"), parameter("error"), parameter("error_description"))
 }
 
 /// Extracts the OAuth protected resource metadata URL from a bearer challenge.
@@ -503,7 +525,7 @@ public func startAuthorization(
 
     if let scope, !scope.isEmpty {
         set("scope", scope)
-        if scope.contains("offline_access") {
+        if scope.split(separator: " ").contains("offline_access") {
             items.append(URLQueryItem(name: "prompt", value: "consent"))
         }
     }
@@ -880,6 +902,11 @@ private func pinTokens(_ tokens: OAuthTokens, to information: OAuthAuthorization
     return result
 }
 
+/// Runs the OAuth flow for `serverUrl`: exchanges an authorization code, refreshes stored tokens, or starts a new authorization.
+///
+/// - Parameter forceReauthorization: When `true`, the stored refresh token is not used and a fresh
+///   authorization request is started. Step-up callers set it when the requested scope strictly
+///   exceeds the current grant, because a refresh cannot widen it (RFC 6749 §6).
 public func auth(
     _ provider: any OAuthClientProvider,
     serverUrl: URL,
@@ -888,6 +915,7 @@ public func auth(
     callbackIssuer: String? = nil,
     scope: String? = nil,
     resourceMetadataUrl: URL? = nil,
+    forceReauthorization: Bool = false,
     fetchFn: MCPFetchFunction? = nil
 ) async throws -> AuthResult {
     var refreshAttempt: OAuthTokens?
@@ -895,7 +923,8 @@ public func auth(
         return try await authInternal(
             provider, serverUrl: serverUrl, authorizationCode: authorizationCode,
             callbackState: callbackState, callbackIssuer: callbackIssuer, scope: scope,
-            resourceMetadataUrl: resourceMetadataUrl, fetchFn: fetchFn, refreshAttempt: &refreshAttempt
+            resourceMetadataUrl: resourceMetadataUrl, forceReauthorization: forceReauthorization,
+            fetchFn: fetchFn, refreshAttempt: &refreshAttempt
         )
     } catch {
         if error is InvalidClientError || error is UnauthorizedClientError {
@@ -910,9 +939,64 @@ public func auth(
         return try await authInternal(
             provider, serverUrl: serverUrl, authorizationCode: authorizationCode,
             callbackState: callbackState, callbackIssuer: callbackIssuer, scope: scope,
-            resourceMetadataUrl: resourceMetadataUrl, fetchFn: fetchFn, refreshAttempt: &retryAttempt
+            resourceMetadataUrl: resourceMetadataUrl, forceReauthorization: forceReauthorization,
+            fetchFn: fetchFn, refreshAttempt: &retryAttempt
         )
     }
+}
+
+/// Splits a space-delimited scope string (RFC 6749 §3.3) into its tokens.
+private func scopeTokens(_ scope: String?) -> [String] {
+    (scope ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
+}
+
+/// Returns each distinct scope token across `scopes` once, in first-seen order, joined by spaces.
+///
+/// Port of `computeScopeUnion`. No hierarchical deduplication is performed. Returns `nil` when
+/// every input is `nil` or empty.
+public func computeScopeUnion(_ scopes: String?...) -> String? {
+    var seen = Set<String>()
+    var ordered: [String] = []
+    for token in scopes.flatMap(scopeTokens) where seen.insert(token).inserted {
+        ordered.append(token)
+    }
+    return ordered.isEmpty ? nil : ordered.joined(separator: " ")
+}
+
+/// Whether `union` contains at least one scope token that `current` lacks.
+///
+/// Port of `isStrictScopeSuperset`. A `nil` or empty `current` counts as the empty set, so any
+/// non-empty `union` is a strict superset; a token response that omits `scope` therefore always
+/// forces a fresh authorization rather than a refresh that could drop the widened scope.
+public func isStrictScopeSuperset(_ union: String?, of current: String?) -> Bool {
+    let currentTokens = Set(scopeTokens(current))
+    return scopeTokens(union).contains { !currentTokens.contains($0) }
+}
+
+/// Selects the scope for an authorization request per the MCP spec (SEP-2207).
+///
+/// The first non-empty of `requestedScope` (the challenge's scope), the protected resource's
+/// `scopes_supported`, and `clientMetadata.scope` wins. `offline_access` is then appended when the
+/// authorization server advertises it, the selection does not already contain it, and the client's
+/// `grantTypes` include `refresh_token`. A `nil` selection stays `nil`.
+public func determineScope(
+    requestedScope: String? = nil,
+    resourceMetadata: OAuthProtectedResourceMetadata? = nil,
+    authServerMetadata: AuthorizationServerMetadata? = nil,
+    clientMetadata: OAuthClientMetadata
+) -> String? {
+    func nonEmpty(_ value: String?) -> String? { value.flatMap { $0.isEmpty ? nil : $0 } }
+    var effectiveScope = nonEmpty(requestedScope)
+        ?? nonEmpty(resourceMetadata?.scopesSupported?.joined(separator: " "))
+        ?? clientMetadata.scope
+
+    if let selected = effectiveScope, !selected.isEmpty,
+       authServerMetadata?.scopesSupported?.contains("offline_access") == true,
+       !selected.split(separator: " ").contains("offline_access"),
+       clientMetadata.grantTypes?.contains("refresh_token") == true {
+        effectiveScope = "\(selected) offline_access"
+    }
+    return effectiveScope
 }
 
 public func selectResourceURL(
@@ -947,6 +1031,7 @@ private func authInternal(
     callbackIssuer: String?,
     scope: String?,
     resourceMetadataUrl: URL?,
+    forceReauthorization: Bool,
     fetchFn: MCPFetchFunction?,
     refreshAttempt: inout OAuthTokens?
 ) async throws -> AuthResult {
@@ -988,10 +1073,10 @@ private func authInternal(
     )
     let currentInformation = authorizationServerInformation(authorizationServerUrl, metadata: metadata)
     var clientMetadata = provider.clientMetadata
-    let resourceScopes = resourceMetadata?.scopesSupported?.joined(separator: " ")
-    let selectedScope = scope.flatMap { $0.isEmpty ? nil : $0 }
-        ?? resourceScopes.flatMap { $0.isEmpty ? nil : $0 }
-        ?? clientMetadata.scope
+    let selectedScope = determineScope(
+        requestedScope: scope, resourceMetadata: resourceMetadata,
+        authServerMetadata: metadata, clientMetadata: clientMetadata
+    )
 
     if authorizationCode == nil { clientInformation = try await provider.clientInformation() }
     if let client = clientInformation, client.issuer != nil {
@@ -1044,7 +1129,7 @@ private func authInternal(
         return .authorized
     }
 
-    if let tokens = try await provider.tokens(), let refreshToken = tokens.refreshToken, !refreshToken.isEmpty {
+    if !forceReauthorization, let tokens = try await provider.tokens(), let refreshToken = tokens.refreshToken, !refreshToken.isEmpty {
         let stored = try await storedAuthorizationServerInformation(provider: provider, clientInformation: client, tokens: tokens)
         if let stored {
             try assertAuthorizationServerMatches(stored, currentInformation)

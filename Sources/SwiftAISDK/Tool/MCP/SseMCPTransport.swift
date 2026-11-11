@@ -19,6 +19,7 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
     private let fetchFn: FetchFunction
     private let headers: [String: String]?
     private let authProvider: (any OAuthClientProvider)?
+    private let maxStepUpRetries: Int
     private let redirect: MCPRedirectMode
     private let authorization = MCPTransportAuthorization()
     private var protocolVersion = LATEST_PROTOCOL_VERSION
@@ -46,6 +47,7 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
         fetchFn = fetch
         headers = config.headers
         authProvider = config.authProvider
+        maxStepUpRetries = max(0, config.maxStepUpRetries)
         redirect = config.redirect
     }
 
@@ -71,9 +73,19 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
     private func authorize(_ response: HTTPURLResponse) async throws {
         guard let authProvider else { throw UnauthorizedError() }
         let challenge = extractWWWAuthenticateParams(response)
-        let result = try await authorization.authorize { [self] in
-            try await auth(authProvider, serverUrl: url, scope: challenge.scope, resourceMetadataUrl: challenge.resourceMetadataUrl, fetchFn: mcpOAuthFetch(fetchFn))
-        }
+        let result = try await authorization.authorizeAfterUnauthorized(
+            provider: authProvider, serverUrl: url,
+            challenge: (challenge.resourceMetadataUrl, challenge.scope), fetch: mcpOAuthFetch(fetchFn)
+        )
+        guard result == .authorized else { throw UnauthorizedError() }
+    }
+
+    /// Re-authorizes for a 403 `insufficient_scope` challenge; the caller retries the request on return.
+    private func stepUp(_ challenge: MCPStepUpChallenge, retries: Int) async throws {
+        let result = try await authorization.stepUp(
+            challenge: challenge, retries: retries, maxRetries: maxStepUpRetries,
+            provider: authProvider, serverUrl: url, fetch: mcpOAuthFetch(fetchFn)
+        )
         guard result == .authorized else { throw UnauthorizedError() }
     }
 
@@ -98,6 +110,7 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
     private func establishConnection(_ pending: MCPOperation<Void>) async {
         do {
             var triedAuth = false
+            var stepUpRetries = 0
             while true {
                 try Task.checkCancellation()
                 var request = URLRequest(url: url)
@@ -110,6 +123,11 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
                     await cancelResponseBody(.init(url: url, httpResponse: response, body: bytes))
                     try await authorize(response)
                     triedAuth = true
+                    continue
+                }
+                if let challenge = await mcpInsufficientScopeChallenge(response, body: bytes) {
+                    try await stepUp(challenge, retries: stepUpRetries)
+                    stepUpRetries += 1
                     continue
                 }
                 let hasBody: Bool
@@ -179,6 +197,7 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
     private func attemptSend(endpoint: URL, message: JSONRPCMessage) async throws {
         do {
             var triedAuth = false
+            var stepUpRetries = 0
             while true {
                 try Task.checkCancellation()
                 var request = URLRequest(url: endpoint)
@@ -194,6 +213,11 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
                         try await authorize(response)
                     }
                     triedAuth = true
+                    continue
+                }
+                if let challenge = await mcpInsufficientScopeChallenge(response, body: body) {
+                    try await stepUp(challenge, retries: stepUpRetries)
+                    stepUpRetries += 1
                     continue
                 }
                 guard (200...299).contains(response.statusCode) else {
