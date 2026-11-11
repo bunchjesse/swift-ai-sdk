@@ -78,7 +78,8 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
     private var _connected = false
     private let headers: [String: String]?
     private let authProvider: (any OAuthClientProvider)?
-    private var resourceMetadataUrl: URL?
+    /// Shares one OAuth recovery between the stream and POST 401 paths.
+    private let authorization = MCPTransportAuthorization()
 
     private var endpoint: URL? {
         get { stateLock.withLock { _endpoint } }
@@ -179,6 +180,8 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
         }
 
         taskToAwait?.cancel()
+        // The recovery runs outside the stream task, which may be waiting on it.
+        await authorization.cancel()
         if let taskToAwait {
             _ = await taskToAwait.result
         }
@@ -217,15 +220,17 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
             }
 
             if http.statusCode == 401, let authProvider, !triedAuth {
-                resourceMetadataUrl = extractResourceMetadataUrl(http)
+                let challenge = extractWWWAuthenticateParams(http)
                 do {
-                    let result = try await auth(
-                        authProvider,
-                        serverUrl: url,
-                        authorizationCode: nil,
-                        scope: nil,
-                        resourceMetadataUrl: resourceMetadataUrl
-                    )
+                    let result = try await authorization.authorize { [url] in
+                        try await auth(
+                            authProvider,
+                            serverUrl: url,
+                            authorizationCode: nil,
+                            scope: challenge.scope,
+                            resourceMetadataUrl: challenge.resourceMetadataUrl
+                        )
+                    }
                     guard result == .authorized else {
                         onerror?(UnauthorizedError())
                         return
@@ -281,15 +286,17 @@ public final class SseMCPTransport: MCPTransport, @unchecked Sendable {
                         }
 
                         if httpResponse.statusCode == 401, let authProvider, !triedAuthLocal {
-                            resourceMetadataUrl = extractResourceMetadataUrl(httpResponse)
+                            let challenge = extractWWWAuthenticateParams(httpResponse)
                             do {
-                                let result = try await auth(
-                                    authProvider,
-                                    serverUrl: url,
-                                    authorizationCode: nil,
-                                    scope: nil,
-                                    resourceMetadataUrl: resourceMetadataUrl
-                                )
+                                let result = try await authorization.authorize { [url] in
+                                    try await auth(
+                                        authProvider,
+                                        serverUrl: url,
+                                        authorizationCode: nil,
+                                        scope: challenge.scope,
+                                        resourceMetadataUrl: challenge.resourceMetadataUrl
+                                    )
+                                }
                                 guard result == .authorized else {
                                     let error = UnauthorizedError()
                                     onerror?(error)

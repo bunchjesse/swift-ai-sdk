@@ -247,5 +247,159 @@ struct OAuthAuthorizationTests {
         #expect(typed.message.contains("HTTP 400: Invalid OAuth error response:"))
         #expect(typed.message.contains("Raw body: not-json"))
     }
+
+    // MARK: - auth scope selection
+
+    /// Runs `auth()` against a mock resource and authorization server, and
+    /// returns the scope sent to dynamic client registration and the scope
+    /// on the resulting authorization URL.
+    private func runAuthScopeSelection(
+        challengeScope: String?,
+        resourceScopes: [String]?,
+        clientScope: String?
+    ) async throws -> (registeredScope: String?, authorizationScope: String?) {
+        let serverUrl = try #require(URL(string: "https://resource.example.com/mcp"))
+        let registeredScope = ScopeTestBox<String?>(nil)
+
+        let fetchFn: MCPFetchFunction = { request in
+            let url = try #require(request.url)
+            let path = url.path
+            func respond(_ status: Int, _ body: [String: Any]) throws -> (Data, HTTPURLResponse) {
+                let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: [
+                    "Content-Type": "application/json",
+                ]))
+                return (try JSONSerialization.data(withJSONObject: body), response)
+            }
+
+            if path.hasPrefix("/.well-known/oauth-protected-resource") {
+                var body: [String: Any] = [
+                    "resource": "https://resource.example.com/mcp",
+                    "authorization_servers": ["https://auth.example.com"],
+                ]
+                if let resourceScopes { body["scopes_supported"] = resourceScopes }
+                return try respond(200, body)
+            }
+            if path.hasPrefix("/.well-known/oauth-authorization-server") {
+                return try respond(200, [
+                    "issuer": "https://auth.example.com",
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token",
+                    "registration_endpoint": "https://auth.example.com/register",
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                ])
+            }
+            if path == "/register" {
+                let body = try #require(request.httpBody)
+                let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+                registeredScope.set(json["scope"] as? String)
+                return try respond(201, ["client_id": "registered-client", "redirect_uris": ["http://127.0.0.1:3000/callback"]])
+            }
+            return try respond(404, [:])
+        }
+
+        let provider = try ScopeTestProvider(clientScope: clientScope)
+        let result = try await auth(
+            provider,
+            serverUrl: serverUrl,
+            scope: challengeScope,
+            fetchFn: fetchFn
+        )
+        #expect(result == .redirect)
+        #expect(provider.savedClientId.get() == "registered-client")
+
+        let authorizationUrl = try #require(provider.authorizationUrl.get())
+        return (registeredScope.get(), queryValue(authorizationUrl, name: "scope"))
+    }
+
+    @Test("auth prefers the WWW-Authenticate challenge scope for registration and authorization")
+    func authPrefersChallengeScope() async throws {
+        let scopes = try await runAuthScopeSelection(
+            challengeScope: "mcp.challenge",
+            resourceScopes: ["mcp.read", "mcp.write"],
+            clientScope: "client.scope"
+        )
+        #expect(scopes.registeredScope == "mcp.challenge")
+        #expect(scopes.authorizationScope == "mcp.challenge")
+    }
+
+    @Test("auth falls back to protected resource scopes_supported")
+    func authFallsBackToResourceScopes() async throws {
+        let scopes = try await runAuthScopeSelection(
+            challengeScope: nil,
+            resourceScopes: ["mcp.read", "mcp.write"],
+            clientScope: "client.scope"
+        )
+        #expect(scopes.registeredScope == "mcp.read mcp.write")
+        #expect(scopes.authorizationScope == "mcp.read mcp.write")
+    }
+
+    @Test("auth falls back to client metadata scope when the server advertises none")
+    func authFallsBackToClientScope() async throws {
+        let scopes = try await runAuthScopeSelection(
+            challengeScope: "",
+            resourceScopes: [],
+            clientScope: "client.scope"
+        )
+        #expect(scopes.registeredScope == "client.scope")
+        #expect(scopes.authorizationScope == "client.scope")
+    }
+
+    @Test("auth omits scope when none is advertised or configured")
+    func authOmitsScopeWhenNoneAvailable() async throws {
+        let scopes = try await runAuthScopeSelection(
+            challengeScope: nil,
+            resourceScopes: nil,
+            clientScope: nil
+        )
+        #expect(scopes.registeredScope == nil)
+        #expect(scopes.authorizationScope == nil)
+    }
+}
+
+/// A lock-guarded value the `@Sendable` fetch and provider closures can write.
+private final class ScopeTestBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func get() -> Value { lock.withLock { value } }
+    func set(_ newValue: Value) { lock.withLock { value = newValue } }
+}
+
+/// An in-memory OAuth provider with no stored client or tokens, so `auth()`
+/// always registers dynamically and ends at the authorization redirect.
+private final class ScopeTestProvider: OAuthClientProvider, @unchecked Sendable {
+    let redirectUrl = URL(string: "http://127.0.0.1:3000/callback")!
+    let clientMetadata: OAuthClientMetadata
+    let savedClientId = ScopeTestBox<String?>(nil)
+    let authorizationUrl = ScopeTestBox<URL?>(nil)
+    private let verifier = ScopeTestBox<String>("")
+
+    init(clientScope: String?) throws {
+        var json: [String: Any] = [
+            "redirect_uris": ["http://127.0.0.1:3000/callback"],
+            "token_endpoint_auth_method": "none",
+        ]
+        if let clientScope { json["scope"] = clientScope }
+        clientMetadata = try JSONDecoder().decode(
+            OAuthClientMetadata.self,
+            from: JSONSerialization.data(withJSONObject: json)
+        )
+    }
+
+    func tokens() async throws -> OAuthTokens? { nil }
+    func saveTokens(_ tokens: OAuthTokens) async throws {}
+    func redirectToAuthorization(_ authorizationUrl: URL) async throws { self.authorizationUrl.set(authorizationUrl) }
+    func saveCodeVerifier(_ codeVerifier: String) async throws { verifier.set(codeVerifier) }
+    func codeVerifier() async throws -> String { verifier.get() }
+    func clientInformation() async throws -> OAuthClientInformation? { nil }
+
+    var saveClientInformation: OAuthSaveClientInformation? {
+        { [savedClientId] information in savedClientId.set(information.clientId) }
+    }
 }
 

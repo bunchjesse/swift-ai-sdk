@@ -119,6 +119,59 @@ struct OAuthDiscoveryTests {
         #expect(extractResourceMetadataUrl(response) == nil)
     }
 
+    // MARK: - extractWWWAuthenticateParams
+
+    @Test("extractWWWAuthenticateParams returns resource metadata url and scope")
+    func extractWWWAuthenticateParamsReturnsBoth() throws {
+        let resourceUrl = "https://resource.example.com/.well-known/oauth-protected-resource/mcp"
+        let response = makeHTTPResponse(
+            url: try #require(URL(string: "https://resource.example.com/mcp")),
+            statusCode: 401,
+            headers: ["WWW-Authenticate": "Bearer resource_metadata=\"\(resourceUrl)\", scope=\"mcp.read mcp.write\""]
+        )
+
+        let params = extractWWWAuthenticateParams(response)
+        #expect(params.resourceMetadataUrl?.absoluteString == resourceUrl)
+        #expect(params.scope == "mcp.read mcp.write")
+    }
+
+    @Test("extractWWWAuthenticateParams matches parameter names case-insensitively")
+    func extractWWWAuthenticateParamsCaseInsensitive() throws {
+        let response = makeHTTPResponse(
+            url: try #require(URL(string: "https://resource.example.com/mcp")),
+            statusCode: 401,
+            headers: ["WWW-Authenticate": "bearer SCOPE=\"mcp.challenge\",Resource_Metadata=\"https://resource.example.com/prm\""]
+        )
+
+        let params = extractWWWAuthenticateParams(response)
+        #expect(params.resourceMetadataUrl?.absoluteString == "https://resource.example.com/prm")
+        #expect(params.scope == "mcp.challenge")
+    }
+
+    @Test("extractWWWAuthenticateParams does not match scope inside another parameter name")
+    func extractWWWAuthenticateParamsIgnoresSuffixMatches() throws {
+        let response = makeHTTPResponse(
+            url: try #require(URL(string: "https://resource.example.com/mcp")),
+            statusCode: 401,
+            headers: ["WWW-Authenticate": "Bearer realm=\"mcp\", insufficient_scope=\"admin\""]
+        )
+
+        #expect(extractWWWAuthenticateParams(response).scope == nil)
+    }
+
+    @Test("extractWWWAuthenticateParams returns nothing for a non-bearer challenge")
+    func extractWWWAuthenticateParamsNotBearer() throws {
+        let response = makeHTTPResponse(
+            url: try #require(URL(string: "https://resource.example.com/mcp")),
+            statusCode: 401,
+            headers: ["WWW-Authenticate": "Basic realm=\"mcp\", scope=\"mcp.read\""]
+        )
+
+        let params = extractWWWAuthenticateParams(response)
+        #expect(params.resourceMetadataUrl == nil)
+        #expect(params.scope == nil)
+    }
+
     // MARK: - discoverOAuthProtectedResourceMetadata
 
     @Test("discoverOAuthProtectedResourceMetadata returns metadata when discovery succeeds")

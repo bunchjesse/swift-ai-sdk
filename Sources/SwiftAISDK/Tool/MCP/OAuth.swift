@@ -94,9 +94,12 @@ public struct UnauthorizedError: Error, LocalizedError, Sendable {
     public var errorDescription: String? { message }
 }
 
-/// Extracts the OAuth 2.0 Protected Resource Metadata URL from a WWW-Authenticate header (RFC9728).
-/// Looks for a `resource_metadata="..."` parameter.
-public func extractResourceMetadataUrl(_ response: HTTPURLResponse) -> URL? {
+/// Extracts the `resource_metadata` URL (RFC9728) and the `scope` a server
+/// advertises in a bearer `WWW-Authenticate` challenge. Either is nil when
+/// the header is missing, isn't a bearer challenge, or omits that parameter.
+public func extractWWWAuthenticateParams(
+    _ response: HTTPURLResponse
+) -> (resourceMetadataUrl: URL?, scope: String?) {
     let headerValue: String? = {
         for (keyAny, valueAny) in response.allHeaderFields {
             guard let key = keyAny as? String else { continue }
@@ -107,31 +110,48 @@ public func extractResourceMetadataUrl(_ response: HTTPURLResponse) -> URL? {
         return nil
     }()
 
-    guard let header = headerValue else { return nil }
+    guard let header = headerValue else { return (nil, nil) }
 
     let parts = header.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-    guard parts.count == 2 else { return nil }
+    guard parts.count == 2, parts[0].lowercased() == "bearer" else { return (nil, nil) }
 
-    let type = parts[0].lowercased()
-    guard type == "bearer" else { return nil }
-
-    // regex taken from MCP spec
-    let pattern = "resource_metadata=\\\"([^\\\"]*)\\\""
-    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-    let range = NSRange(header.startIndex..<header.endIndex, in: header)
-    guard let match = regex.firstMatch(in: header, range: range),
-          match.numberOfRanges >= 2,
-          let urlRange = Range(match.range(at: 1), in: header)
-    else { return nil }
-
-    let urlString = String(header[urlRange])
-    guard let url = URL(string: urlString),
-          url.scheme != nil,
-          url.host != nil
-    else {
-        return nil
+    /// Returns the quoted value of auth-param `name`, matched only at the
+    /// start of a parameter so `scope` never matches inside another name.
+    func parameter(_ name: String) -> String? {
+        let pattern = "(?:^|[,\\s])\(name)=\\\"([^\\\"]*)\\\""
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: header, range: NSRange(header.startIndex..., in: header)),
+              let range = Range(match.range(at: 1), in: header)
+        else { return nil }
+        return String(header[range])
     }
-    return url
+
+    let url = parameter("resource_metadata").flatMap(URL.init(string:))
+    let resourceMetadataUrl = (url?.scheme != nil && url?.host != nil) ? url : nil
+    return (resourceMetadataUrl, parameter("scope"))
+}
+
+/// Extracts the OAuth 2.0 Protected Resource Metadata URL from a WWW-Authenticate header (RFC9728).
+/// Looks for a `resource_metadata="..."` parameter.
+public func extractResourceMetadataUrl(_ response: HTTPURLResponse) -> URL? {
+    extractWWWAuthenticateParams(response).resourceMetadataUrl
+}
+
+/// Picks the scope to register and authorize with: the challenge's scope,
+/// else the protected resource's `scopes_supported`, else the client's own.
+/// An empty value counts as absent.
+func selectScope(
+    scope: String?,
+    resourceMetadata: OAuthProtectedResourceMetadata?,
+    clientMetadata: OAuthClientMetadata
+) -> String? {
+    if let scope, !scope.isEmpty {
+        return scope
+    }
+    if let resourceScopes = resourceMetadata?.scopesSupported?.joined(separator: " "), !resourceScopes.isEmpty {
+        return resourceScopes
+    }
+    return clientMetadata.scope
 }
 
 // MARK: - Network Helpers
@@ -796,6 +816,13 @@ private func authInternal(
         fetchFn: fetchFn
     )
 
+    var clientMetadata = provider.clientMetadata
+    let selectedScope = selectScope(
+        scope: scope,
+        resourceMetadata: resourceMetadata,
+        clientMetadata: clientMetadata
+    )
+
     var clientInformation = try await provider.clientInformation()
 
     if clientInformation == nil {
@@ -811,10 +838,11 @@ private func authInternal(
             )
         }
 
+        clientMetadata.scope = selectedScope
         let fullInformation = try await registerClient(
             authorizationServerUrl: authorizationServerUrl!,
             metadata: metadata,
-            clientMetadata: provider.clientMetadata,
+            clientMetadata: clientMetadata,
             fetchFn: fetchFn
         )
 
@@ -879,7 +907,7 @@ private func authInternal(
         metadata: metadata,
         clientInformation: clientInformation!,
         redirectUrl: provider.redirectUrl,
-        scope: scope ?? provider.clientMetadata.scope,
+        scope: selectedScope,
         state: state,
         resource: resource
     )

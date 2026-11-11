@@ -192,7 +192,7 @@ public struct OAuthClientMetadata: Codable, Sendable, Equatable {
     public let clientName: String?
     public let clientUri: SafeURL?
     public let logoUri: SafeURL?
-    public let scope: String?
+    public var scope: String?
     public let contacts: [String]?
     public let tosUri: SafeURL?
     public let policyUri: String?
