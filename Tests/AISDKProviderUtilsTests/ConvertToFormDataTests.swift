@@ -157,15 +157,15 @@ struct MultipartFormDataBuilderTests {
             data: Data("binary".utf8)
         )
 
-        let expected = Data((
-            "--test-boundary\r\n" +
-            "Content-Disposition: form-data; name=\"field%0D%0Aname%0D%0Aline%0D%0Apair%22quote\\slash%\"\r\n\r\nvalue\r\n" +
-            "--test-boundary\r\n" +
-            "Content-Disposition: form-data; name=\"file%0D%0Aname%0D%0Aline%0D%0Apair%22quote\\slash%\"; " +
-            "filename=\"path/quo%22te\\slash%0Dname%0Aline%0D%0Apair\"\r\n" +
-            "Content-Type: image/png;x=y\r\n\r\nbinary\r\n" +
-            "--test-boundary--\r\n"
-        ).utf8)
+        let expected = Data([
+            "--test-boundary\r\n",
+            "Content-Disposition: form-data; name=\"field%0D%0Aname%0D%0Aline%0D%0Apair%22quote\\slash%\"\r\n\r\nvalue\r\n",
+            "--test-boundary\r\n",
+            "Content-Disposition: form-data; name=\"file%0D%0Aname%0D%0Aline%0D%0Apair%22quote\\slash%\"; ",
+            "filename=\"path/quo%22te\\slash%0Dname%0Aline%0D%0Apair\"\r\n",
+            "Content-Type: image/png;x=y\r\n\r\nbinary\r\n",
+            "--test-boundary--\r\n",
+        ].joined().utf8)
 
         #expect(builder.build().data == expected)
     }

@@ -215,7 +215,7 @@ public final class GoogleLanguageModel: LanguageModelV4 {
         let request = try await prepare(options, streaming: true)
         let headers = combineHeaders(try config.headers(), options.headers?.mapValues { Optional($0) }, request.extraHeaders).compactMapValues { $0 }
         let url = "\(try config.resolveBaseURL?() ?? config.baseURL)/\(getGoogleModelPath(modelId)):streamGenerateContent?alt=sse"
-        let first = try await postJsonToAPI(url: url, headers: headers, body: JSONValue.object(request.body), failedResponseHandler: googleFailedResponseHandler, successfulResponseHandler: createEventSourceResponseHandler(chunkSchema: googleResponseSchema), isAborted: options.abortSignal, fetch: config.fetch)
+        let first = try await postJsonToAPI(url: url, headers: headers, body: JSONValue.object(request.body), failedResponseHandler: googleFailedResponseHandler, successfulResponseHandler: createGoogleEventSourceResponseHandler(chunkSchema: googleResponseSchema), isAborted: options.abortSignal, fetch: config.fetch)
         let stream = AsyncThrowingStream<LanguageModelV4StreamPart, Error> { continuation in
             let task = Task {
                 continuation.yield(.streamStart(warnings: request.warnings))
@@ -242,7 +242,7 @@ public final class GoogleLanguageModel: LanguageModelV4 {
                         var body = request.body
                         body["continuationToken"] = .string(token)
                         do {
-                            source = try await postJsonToAPI(url: url, headers: headers, body: JSONValue.object(body), failedResponseHandler: googleFailedResponseHandler, successfulResponseHandler: createEventSourceResponseHandler(chunkSchema: googleResponseSchema), isAborted: options.abortSignal, fetch: config.fetch).value
+                            source = try await postJsonToAPI(url: url, headers: headers, body: JSONValue.object(body), failedResponseHandler: googleFailedResponseHandler, successfulResponseHandler: createGoogleEventSourceResponseHandler(chunkSchema: googleResponseSchema), isAborted: options.abortSignal, fetch: config.fetch).value
                         } catch {
                             continuation.yield(.error(error: .error(error)))
                             break
