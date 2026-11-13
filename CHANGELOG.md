@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 - MCP OAuth follows the 2025-11-25 authorization spec: `determineScope(requestedScope:resourceMetadata:authServerMetadata:clientMetadata:)` selects the scope (challenge, then protected-resource `scopes_supported`, then client scope) and appends `offline_access` when the authorization server advertises it and the client's `grantTypes` include `refresh_token` (SEP-2207); the selection is used for dynamic registration and the authorization request. `auth(...)` takes `forceReauthorization:` to skip the refresh token, and `computeScopeUnion` / `isStrictScopeSuperset` expose the scope-set helpers.
 - Streamable HTTP and legacy SSE transports handle 403 `insufficient_scope` (SEP-2350): with an `authProvider` they re-authorize for the union of the previously requested, granted, and challenged scopes (forcing a fresh authorization when that widens the grant) and retry up to `MCPTransportConfig.maxStepUpRetries` times (default 1); without one they throw the new `InsufficientScopeError`. `extractWWWAuthenticateParams` now also returns `error` and `error_description` and accepts unquoted parameter values.
+- Anthropic: add Claude Fable 5.2 (`claude-fable-5-2`) to the known model IDs. It shares Claude Fable 5.1's capabilities, so a forced `tool_choice` (`required` or a named tool) is sent as `auto` with a warning instead of failing with a 400. Add the Bedrock `anthropic.`, `us.anthropic.`, and `global.anthropic.` `claude-fable-5-2` model IDs.
 
 ## [0.20.0] - 2026-10-17
 
